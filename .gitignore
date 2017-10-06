@@ -1,3 +1,4 @@
+
 *.ipch
 *.opensdf
 *.sdf
@@ -56,3 +57,8 @@ Sharing/Src/Solutions/Xcode/XToolsClient/build
 *.cache
 *.config
 /Input/MicStreamSelector/Projects/MicDemoApp/obj
+
+/SystemInfoHelper/*/x64/*
+/SystemInfoHelper/x64/*
+/SystemInfoHelper/*/x86/*
+/SystemInfoHelper/x86/*
