@@ -7,8 +7,7 @@
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 
+#include <cmath>
 #include <vector>
-#include <sstream>
-#include <iomanip>
 
 #pragma comment(lib, "d3d11")

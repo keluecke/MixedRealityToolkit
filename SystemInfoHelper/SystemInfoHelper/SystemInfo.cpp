@@ -51,11 +51,11 @@ SystemInfo::SystemInfo(Windows::Graphics::Holographic::HolographicAdapterId adap
 		}
 	}
 
-	m_renderScaleOverride = ref new RenderScaleOverride();
-
 	m_dedicatedVideoMemoryMB = dedicatedVideoMemory * m_bToMB;
 	m_sharedSystemMemoryMB = sharedSystemMemory * m_bToMB;
 	m_dedicatedSystemMemoryMB = dedicatedSystemMemory * m_bToMB;
+
+	FindSystemCpuInfo();
 }
 
 IAsyncOperation<RenderScaleOverride^>^ SystemInfo::ReadRenderScaleAsync()
@@ -63,53 +63,89 @@ IAsyncOperation<RenderScaleOverride^>^ SystemInfo::ReadRenderScaleAsync()
 	return concurrency::create_async(
 		[this]()
 		{
-			if (m_renderScaleOverride->RenderScaleValue > 0)
+			try
 			{
-				return m_renderScaleOverride;
+				return ReadRenderScaleAsyncInternal().get();
+			}
+			catch (...)
+			{
+				return (RenderScaleOverride^)nullptr;
 			}
 
-			StorageFolder^ storageFolder = ApplicationData::Current->LocalFolder;
-			return concurrency::create_task(
-				storageFolder->GetFileAsync(ms_RenderScaleOverrideSaveFile)
-			).then(
-				[](StorageFile^ file)
-				{
-					return FileIO::ReadTextAsync(file);
-				}
-			).then(
-				[this](String ^ textData)
-				{
-					RenderScaleOverride^ localOverride = ref new RenderScaleOverride();
-					JsonValue^ jsonValue = JsonValue::Parse(textData);
-					localOverride->RenderScaleValue = (float)jsonValue->GetObject()->GetNamedNumber(ms_renderScaleValueName);
-					localOverride->ScaledVerticalResolution = (unsigned int)jsonValue->GetObject()->GetNamedNumber(ms_scaledVerticalResolution);
-					localOverride->MaxVerticalResolution = (unsigned int)jsonValue->GetObject()->GetNamedNumber(ms_maxVerticalResolution);
-
-					// validate the values read from the file
-					// TODO: shall we have some sane max values just in case
-					if (localOverride->RenderScaleValue < 0 || localOverride->RenderScaleValue > 2 ||
-						localOverride->ScaledVerticalResolution == 0 || localOverride->MaxVerticalResolution == 0)
-					{
-						return m_renderScaleOverride;
-					}
-
-					m_renderScaleOverride = localOverride;
-					return m_renderScaleOverride;
-				}
-			).get();
 		}
 	);
 }
 
-IAsyncAction^ SystemInfo::WriteRenderScaleAsync(RenderScaleOverride^ renderOverride)
+concurrency::task<RenderScaleOverride^> SystemInfo::ReadRenderScaleAsyncInternal()
+{
+	RenderScaleOverride^ nullret = nullptr;
+	StorageFolder^ storageFolder = ApplicationData::Current->LocalFolder;
+	return concurrency::create_task(
+		storageFolder->GetFileAsync(ms_RenderScaleOverrideSaveFile)
+	).then(
+		[](StorageFile^ file)
+		{
+			return FileIO::ReadTextAsync(file);
+		}, concurrency::task_continuation_context::use_arbitrary()
+	).then(
+		[this, nullret](String ^ textData)
+		{
+			RenderScaleOverride^ tempOverrides = ref new RenderScaleOverride();
+			JsonValue^ jsonValue = JsonValue::Parse(textData);
+			tempOverrides->RenderScaleValue = (float)jsonValue->GetObject()->GetNamedNumber(ms_renderScaleValueName);
+			tempOverrides->ScaledVerticalResolution = (int)jsonValue->GetObject()->GetNamedNumber(ms_scaledVerticalResolution);
+			tempOverrides->MaxVerticalResolution = (int)jsonValue->GetObject()->GetNamedNumber(ms_maxVerticalResolution);
+
+			if (!ValidateRenderScaleValues(tempOverrides))
+			{
+				return (RenderScaleOverride^)nullptr;
+			}
+
+			return tempOverrides;
+		}, concurrency::task_continuation_context::use_arbitrary()
+	);
+}
+
+RenderScaleOverride^ SystemInfo::ReadRenderScaleSpinLockSync()
+{
+	// this should be fine for UWP
+	auto startTime = GetTickCount64();
+
+	auto readTask = ReadRenderScaleAsyncInternal();
+	// spin until task is done or after 5 seconds elapse, whatever comes first
+	while (!readTask.is_done())
+	{
+		if (GetTickCount64() - startTime > 5000)
+		{
+			// give up if we were spinning for more than 5 seconds
+			return (RenderScaleOverride^)nullptr;
+		}
+	}
+
+	try
+	{
+		return readTask.get();
+	}
+	catch (...)
+	{
+		return (RenderScaleOverride^)nullptr;
+	}
+}
+
+IAsyncAction^ SystemInfo::WriteRenderScaleAsync(RenderScaleOverride^ renderOverrides)
 {
 	return concurrency::create_async(
-		[this, renderOverride]()
+		[this, renderOverrides]()
 		{
+			if (!ValidateRenderScaleValues(renderOverrides))
+			{
+				throw ref new Exception(E_INVALIDARG, "The render scale values are invalid");
+			}
+
 			JsonObject^ jsonObj = ref new JsonObject();
-			jsonObj->Insert(ms_renderScaleValueName, JsonValue::CreateNumberValue(renderOverride->RenderScaleValue));
-			jsonObj->Insert(ms_scaledVerticalResolution, JsonValue::CreateNumberValue(renderOverride->ScaledVerticalResolution));
-			jsonObj->Insert(ms_maxVerticalResolution, JsonValue::CreateNumberValue(renderOverride->MaxVerticalResolution));
+			jsonObj->Insert(ms_renderScaleValueName, JsonValue::CreateNumberValue(renderOverrides->RenderScaleValue));
+			jsonObj->Insert(ms_scaledVerticalResolution, JsonValue::CreateNumberValue(renderOverrides->ScaledVerticalResolution));
+			jsonObj->Insert(ms_maxVerticalResolution, JsonValue::CreateNumberValue(renderOverrides->MaxVerticalResolution));
 
 			StorageFolder^ storageFolder = ApplicationData::Current->LocalFolder;
 			concurrency::create_task(
@@ -120,10 +156,59 @@ IAsyncAction^ SystemInfo::WriteRenderScaleAsync(RenderScaleOverride^ renderOverr
 					return FileIO::WriteTextAsync(renderScaleOverridesFile, jsonObj->Stringify());
 				}
 			).get();
-
-			m_renderScaleOverride = renderOverride;
 		}
 	);
+}
+
+IAsyncAction^ SystemInfo::InvalidateRenderScaleAsync()
+{
+	return concurrency::create_async(
+		[]()
+		{
+			StorageFolder^ storageFolder = ApplicationData::Current->LocalFolder;
+			auto deleteTask = concurrency::create_task(
+				storageFolder->GetFileAsync(ms_RenderScaleOverrideSaveFile)
+			).then(
+				[storageFolder](StorageFile^ file)
+				{
+					file->DeleteAsync();
+				}
+			);
+
+			try
+			{
+				deleteTask.get();
+			}
+			catch (Exception^ ex)
+			{
+				// catch any exceptions this may cause. most likely file
+				// not found in which case call to this function was not
+				// necessary
+			}
+		}
+	);
+}
+
+bool SystemInfo::ValidateRenderScaleValues(RenderScaleOverride^ renderOverrides)
+{
+	// TODO: shall we have some sane max values just in case
+	if (renderOverrides->RenderScaleValue < 0 || renderOverrides->RenderScaleValue > 2 ||
+		renderOverrides->ScaledVerticalResolution == 0 || renderOverrides->MaxVerticalResolution == 0)
+	{
+		return false;
+	}
+
+	float calculatedMaxF = renderOverrides->ScaledVerticalResolution / renderOverrides->RenderScaleValue;
+	int calculatedMaxI = (int)std::roundf(calculatedMaxF);
+
+	int maxDiff = std::abs(calculatedMaxI - renderOverrides->MaxVerticalResolution);
+	// allow for 1 pixel tolerance due to rounding errors
+	if (maxDiff > 1)
+	{
+		return false;
+	}
+
+	return true;
 }
 
 IDXGIAdapter* SystemInfo::GetAdapterFromId(Windows::Graphics::Holographic::HolographicAdapterId adapterId)

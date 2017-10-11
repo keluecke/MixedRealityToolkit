@@ -6,14 +6,14 @@ namespace SystemInfoHelper
 	{
 		RenderScaleOverride()
 		{
-			RenderScaleValue = 0;
+			RenderScaleValue = -1;
 			ScaledVerticalResolution = 0;
 			MaxVerticalResolution = 0;
 		}
 
 		property float RenderScaleValue;
-		property unsigned int ScaledVerticalResolution;
-		property unsigned int MaxVerticalResolution;
+		property int ScaledVerticalResolution;
+		property int MaxVerticalResolution;
 	};
 
 	public ref class SystemInfo sealed
@@ -56,14 +56,19 @@ namespace SystemInfoHelper
 			unsigned int get() { return m_numProcessors; }
 		}
 
+		/// Only to be used during App initialization where we cannot block to wait on a task
+		RenderScaleOverride^ ReadRenderScaleSpinLockSync();
 		Windows::Foundation::IAsyncOperation<RenderScaleOverride^>^ ReadRenderScaleAsync();
 		Windows::Foundation::IAsyncAction^ WriteRenderScaleAsync(RenderScaleOverride^ renderOverride);
+		Windows::Foundation::IAsyncAction^ InvalidateRenderScaleAsync();
 
 	private:
 		IDXGIAdapter* GetAdapterFromId(Windows::Graphics::Holographic::HolographicAdapterId adapterId);
 		void FindSystemCpuInfo();
 
-		RenderScaleOverride^ m_renderScaleOverride;
+		bool ValidateRenderScaleValues(RenderScaleOverride^ renderOverrides);
+		concurrency::task<RenderScaleOverride^> ReadRenderScaleAsyncInternal();
+
 		Platform::String^ m_description;
 		static Platform::String^ ms_RenderScaleOverrideSaveFile;
 		static Platform::String^ ms_renderScaleValueName;
